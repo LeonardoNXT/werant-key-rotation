@@ -195,9 +195,6 @@ The runtime generator creates a 2048-bit RSA key pair using Go's `crypto/rand` a
 - The declared key use is `sig`.
 - The key identifier is a UUIDv7.
 
-> [!IMPORTANT]
-> The root `main.go` is an isolated cryptographic demonstration and generates a 3072-bit RSA key. The Lambda runtime uses the generator under `internal/infra/adapters`, which currently generates 2048-bit keys.
-
 ### Public JWK
 
 Each generated public key has the following representation:
@@ -403,7 +400,6 @@ cryptographic/
 │   ├── 000001_create_signing_keys.up.sql
 │   └── 000001_create_signing_keys.down.sql
 │
-├── main.go                               # Standalone RSA/JWK demonstration
 ├── go.mod
 ├── go.sum
 └── LICENSE
@@ -549,9 +545,6 @@ Infrastructure should still prevent overlapping Lambda invocations. RSA generati
 | Rotation concurrency | Transaction-scoped PostgreSQL advisory lock. |
 | Lifecycle cardinality | Partial unique indexes for `active` and `deactivated`. |
 | AWS authorization | Lambda execution role and KMS key policy. |
-
-> [!CAUTION]
-> The standalone root `main.go` prints serialized private-key bytes for demonstration purposes. It is not the Lambda entry point and must not be used in production workflows or environments where its output can be retained.
 
 ### Operational Security Requirements
 
