@@ -8,12 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 )
 
-type Encrypt struct{}
+type Encrypt struct {
+	version string
+}
 
-func (Encrypt) GenerateEncryption(
+func CreateEncrypt(version string) Encrypt {
+	return Encrypt{version: version}
+}
+
+func (adapter Encrypt) GenerateEncryption(
 	dek *ports.DEK,
 	privateKey []byte,
 	kid string,
@@ -54,8 +59,7 @@ func (Encrypt) GenerateEncryption(
 		return nil, fmt.Errorf("[ADAPTER][ENCRYPTION][ERROR] generate nonce: %w", err)
 	}
 
-	version := os.Getenv("SIGNING_KEY_VERSION")
-	aad := []byte("foundation:signing-key:" + version + ":" + kid)
+	aad := []byte("foundation:signing-key:" + adapter.version + ":" + kid)
 
 	encryptedPrivateKey := aesgcm.Seal(
 		nil,
@@ -68,6 +72,6 @@ func (Encrypt) GenerateEncryption(
 		EncryptedDek:        dek.CipherTextBlob,
 		EncryptedPrivateKey: encryptedPrivateKey,
 		Nonce:               nonce,
-		Version:             version,
+		Version:             adapter.version,
 	}, nil
 }

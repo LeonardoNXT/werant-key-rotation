@@ -39,10 +39,10 @@ func Start(ctx context.Context) {
 	dep := &usecase.PipelineDep{
 		RSAKeys: adapters.RSAKeys{},
 		Command: commandDep,
-		Encrypt: adapters.Encrypt{},
+		Encrypt: adapters.CreateEncrypt(environment.SigningKeyVersion),
 		Query:   queryDep,
 		Clock:   adapters.Clock{},
-		KMS:     aws.CreateKMS(),
+		KMS:     aws.CreateKMS(environment.AWSRegion, environment.KMSKeyID),
 		Id:      adapters.IdGenerator{},
 		Ctx:     ctx,
 	}

@@ -4,41 +4,44 @@ import (
 	"context"
 	"cryptographic/internal/application/ports"
 	"fmt"
-	"os"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 )
 
-type KMS struct{}
-
-func CreateKMS() KMS {
-	return KMS{}
+type KMS struct {
+	region string
+	keyID  string
 }
 
-func (KMS) GenerateDataEncryptionKey(ctx context.Context) (*ports.DEK, error) {
+func CreateKMS(region string, keyID string) KMS {
+	return KMS{
+		region: region,
+		keyID:  keyID,
+	}
+}
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("sa-east-1"))
+func (adapter KMS) GenerateDataEncryptionKey(ctx context.Context) (*ports.DEK, error) {
+
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(adapter.region))
 
 	if err != nil {
-		return nil, fmt.Errorf("[AWS][KMS][LOAD-DEFAULT-CONFIG][ERROR] " + err.Error())
+		return nil, fmt.Errorf("[AWS][KMS][LOAD-DEFAULT-CONFIG][ERROR] %w", err)
 	}
 
 	client := kms.NewFromConfig(cfg)
 
-	keyID := os.Getenv("KMS_KEY_ID")
-
 	keys, err := client.GenerateDataKey(
 		ctx,
 		&kms.GenerateDataKeyInput{
-			KeyId:   &keyID,
+			KeyId:   &adapter.keyID,
 			KeySpec: types.DataKeySpecAes256,
 		},
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("[AWS][KMS][GENERATE-DATA-KEY][ERROR] " + err.Error())
+		return nil, fmt.Errorf("[AWS][KMS][GENERATE-DATA-KEY][ERROR] %w", err)
 	}
 
 	return &ports.DEK{
