@@ -1,0 +1,151 @@
+
+# ==========================================
+# Go
+# ==========================================
+
+/bin/
+/build/
+/dist/
+/tmp/
+/temp/
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+*.pprof
+*.trace
+*.cover
+*.coverprofile
+
+go.work
+go.work.sum
+
+# ==========================================
+# Testing & Coverage
+# ==========================================
+
+/coverage/
+/test-results/
+
+coverage.txt
+coverage.html
+coverage.out
+coverage*.json
+
+# ==========================================
+# AWS Lambda
+# ==========================================
+
+.aws-sam/
+.serverless/
+
+bootstrap
+*.zip
+
+# ==========================================
+# Terraform
+# ==========================================
+
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+crash.log
+crash.*.log
+
+# ==========================================
+# Environment & Secrets
+# ==========================================
+
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.secret
+*.secrets
+
+credentials.json
+secrets.json
+service-account.json
+
+# ==========================================
+# Databases
+# ==========================================
+
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ==========================================
+# Logs & Runtime
+# ==========================================
+
+*.log
+/logs/
+/runtime/
+
+*.pid
+*.pid.lock
+
+# ==========================================
+# IDEs & Editors
+# ==========================================
+
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+*.iml
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ==========================================
+# Operating Systems
+# ==========================================
+
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+._*
+
+# ==========================================
+# Local Tooling
+# ==========================================
+
+.cache/
+/.local/
+/artifacts/
+
+*.bak
+*.backup
+*.orig
