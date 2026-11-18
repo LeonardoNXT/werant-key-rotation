@@ -45,7 +45,7 @@ The architecture is guided by five principles:
 - **Dependency isolation** — Domain and application behavior depend on ports rather than directly on AWS, PostgreSQL, or system time.
 
 > [!NOTE]
-> The project is under active development. Key generation, envelope encryption, lifecycle rotation, AWS Lambda bootstrap, and PostgreSQL persistence are implemented. Database migrations, automated tests, concurrency controls, and deployment automation remain intentional follow-up work.
+> The project is under active development. Key generation, envelope encryption, lifecycle rotation, AWS Lambda bootstrap, PostgreSQL persistence, schema migrations, automated tests, and validation CI are implemented. Real AWS KMS/PostgreSQL integration tests and production observability remain follow-up work.
 
 ---
 
@@ -144,6 +144,8 @@ stateDiagram-v2
 
 The first rotation is detected only when the `signing_keys` table contains no records.
 
+The command checks the table again while holding the rotation transaction lock. If another initialization has already created keys, the stale first-rotation attempt is skipped.
+
 The transaction then:
 
 1. Creates an initial release key with `pending` status.
@@ -164,7 +166,7 @@ For every later execution, the database transaction performs the transitions in 
 
 1. `deactivated` → `retired`
 2. `active` → `deactivated`
-3. `pending` → `active`
+3. Oldest `pending` → `active`
 4. Insert the newly generated key as `pending`
 
 ```mermaid
@@ -176,6 +178,8 @@ flowchart LR
 ```
 
 All status updates and the insertion of the next key occur inside one PostgreSQL transaction. A database failure causes the rotation transaction to roll back.
+
+Multiple `pending` keys are allowed. A regular rotation promotes only the oldest eligible `pending` record, ordered by `created_at` and `id`; it never promotes every pending key in one statement.
 
 ---
 
@@ -321,8 +325,26 @@ The GORM model maps to the plural PostgreSQL table `signing_keys`, while the dom
 | `deactivated_at` | Nullable `timestamptz` | Deactivation time. |
 | `retired_at` | Nullable `timestamptz` | Retirement time. |
 
-> [!WARNING]
-> This repository does not currently create or migrate the database schema. The `signing_keys` table must exist before the Lambda runs, and its schema must remain compatible with the GORM model.
+The initial migration is available at `migrations/000001_create_signing_keys.up.sql`. The application does not apply migrations automatically; schema changes remain an explicit deployment operation.
+
+```bash
+psql "$POSTGRES_URL" \
+  -v ON_ERROR_STOP=1 \
+  -f migrations/000001_create_signing_keys.up.sql
+```
+
+### Lifecycle Invariants
+
+The migration enforces lifecycle behavior with check constraints and partial unique indexes.
+
+| Invariant | Database control |
+| :-------- | :--------------- |
+| Supported algorithms | `algorithm` must be `RS256`. |
+| Supported states | `status` must be `pending`, `active`, `deactivated`, or `retired`. |
+| Timestamp consistency | Each status requires the corresponding activation, deactivation, and retirement timestamps. |
+| Single active key | A partial unique index allows at most one row where `status = 'active'`. |
+| Single deactivated key | A partial unique index allows at most one row where `status = 'deactivated'`. |
+| Pending backlog | Multiple `pending` rows are allowed and indexed by creation order. |
 
 ### Transaction Boundary
 
@@ -341,6 +363,10 @@ Generated material from a failed transaction is discarded and can be regenerated
 
 ```text
 cryptographic/
+│
+├── .github/
+│   └── workflows/
+│       └── validate.yml                  # Formatting, vet, tests, and build
 │
 ├── cmd/
 │   └── aws/
@@ -373,6 +399,10 @@ cryptographic/
 │           ├── query/                    # Rotation state queries
 │           └── client.go                 # PostgreSQL client
 │
+├── migrations/
+│   ├── 000001_create_signing_keys.up.sql
+│   └── 000001_create_signing_keys.down.sql
+│
 ├── main.go                               # Standalone RSA/JWK demonstration
 ├── go.mod
 ├── go.sum
@@ -403,6 +433,7 @@ The Lambda depends on environment configuration and the standard AWS SDK credent
 | `POSTGRES_URL` | Yes | PostgreSQL DSN used by GORM. The bootstrap validates that it is present. |
 | `KMS_KEY_ID` | Yes | AWS KMS key ID or ARN used by `GenerateDataKey`. |
 | `SIGNING_KEY_VERSION` | Yes | Version persisted with the key and included in AES-GCM AAD. |
+| `AWS_REGION` | Yes | AWS region used to configure the KMS client. |
 
 Example local environment:
 
@@ -410,20 +441,15 @@ Example local environment:
 export POSTGRES_URL='postgres://user:password@localhost:5432/werant?sslmode=require'
 export KMS_KEY_ID='arn:aws:kms:sa-east-1:000000000000:key/00000000-0000-0000-0000-000000000000'
 export SIGNING_KEY_VERSION='v1'
+export AWS_REGION='sa-east-1'
 ```
 
 > [!IMPORTANT]
-> `KMS_KEY_ID` and `SIGNING_KEY_VERSION` are operationally required but are not yet validated by the configuration package. Empty values should be prevented by deployment configuration until application-level validation is added.
+> Startup validates all four variables and reports every missing value in one error. Whitespace-only values are treated as missing.
 
 ### AWS Region
 
-The KMS adapter currently loads the AWS SDK configuration with the fixed region:
-
-```text
-sa-east-1
-```
-
-The configured KMS key must be available in that region.
+The KMS adapter loads its region from `AWS_REGION`. The configured KMS key must exist in the same region. Werant currently intends to deploy this workload in `sa-east-1`, but that choice is now deployment configuration rather than an application constant.
 
 ### AWS Identity
 
@@ -445,7 +471,7 @@ The KMS key policy must also trust the execution role. PostgreSQL credentials an
 
 - Go version declared by `go.mod`.
 - PostgreSQL with the compatible `signing_keys` table.
-- AWS KMS key in `sa-east-1`.
+- AWS KMS key in the configured `AWS_REGION`.
 - AWS identity authorized to call `kms:GenerateDataKey`.
 - Network access from the runtime to PostgreSQL and AWS KMS.
 
@@ -462,7 +488,7 @@ zip rotation-key.zip bootstrap
 
 For an x86_64 Lambda environment, use `GOARCH=amd64` instead. The Lambda architecture must match the compiled binary.
 
-This repository currently contains the application code only. Lambda provisioning, environment injection, networking, scheduling, artifact upload, and release promotion are expected to be managed by the deployment infrastructure.
+Lambda provisioning, environment injection, networking, scheduling, artifact upload, and release promotion are expected to be managed by the separate deployment infrastructure. The intended ten-minute EventBridge schedule is therefore not defined by this worker.
 
 ### Invocation Contract
 
@@ -499,9 +525,11 @@ In AWS Lambda, these messages are captured by the configured logging integration
 
 ### Concurrency
 
-The current implementation assumes one rotation execution at a time. It does not yet acquire an advisory lock, use a distributed mutex, or enforce lifecycle cardinality through database constraints.
+The persistence command calls PostgreSQL `pg_try_advisory_xact_lock` before changing lifecycle state. If another rotation transaction holds the same lock, the entire competing database rotation is skipped.
 
-Until concurrency control is implemented, the invocation source should prevent overlapping executions.
+This intentionally differs from row-level `FOR UPDATE SKIP LOCKED`. Skipping individual locked keys could produce an incomplete lifecycle transition—for example, deactivating the current key while skipping the locked pending key that should become active. The advisory lock treats rotation as one indivisible operation.
+
+Infrastructure should still prevent overlapping Lambda invocations. RSA generation and KMS calls occur before the database transaction, so infrastructure-level serialization avoids unnecessary cryptographic work even though the database mutation is protected.
 
 ---
 
@@ -518,6 +546,8 @@ Until concurrency control is implemented, the invocation source should prevent o
 | Key identity | UUIDv7 shared across public and private material. |
 | Persistence | No plaintext private key or plaintext DEK. |
 | Rotation atomicity | PostgreSQL transaction. |
+| Rotation concurrency | Transaction-scoped PostgreSQL advisory lock. |
+| Lifecycle cardinality | Partial unique indexes for `active` and `deactivated`. |
 | AWS authorization | Lambda execution role and KMS key policy. |
 
 > [!CAUTION]
@@ -555,7 +585,30 @@ go build ./...
 go test ./...
 ```
 
-Automated tests have not yet been introduced, so the test command currently validates package compilation rather than a complete behavioral test suite.
+The automated suite covers:
+
+- RSA/JWK generation, PKCS #8 parsing, UUIDv7 identity, and Base64URL exponent encoding.
+- Domain-to-GORM mapper round trips and invalid timestamps.
+- Signing-key creation and dependency error propagation.
+- First and regular rotation use-case paths.
+- AES-256-GCM encryption/decryption round trips and AAD authentication.
+- Required environment configuration.
+
+AWS KMS and PostgreSQL integration tests are intentionally deferred until real test resources and lifecycle management exist.
+
+### Continuous Integration
+
+`.github/workflows/validate.yml` runs on pull requests and pushes to `main`.
+
+The workflow verifies:
+
+- `gofmt` formatting.
+- Clean `go.mod` and `go.sum` files.
+- `go vet` diagnostics.
+- Tests with the race detector and coverage output.
+- Compilation of all packages.
+
+The workflow performs validation only. It does not publish artifacts or release the Lambda.
 
 ### Design Rules
 
@@ -574,15 +627,11 @@ When extending the service:
 
 ## Current Limitations
 
-- The database schema and migrations are not managed by this repository.
-- Automated unit, integration, and cryptographic round-trip tests are not present.
-- Rotation executions are not serialized with a database or distributed lock.
-- Database constraints do not yet guarantee one `active` and one `pending` key.
-- `KMS_KEY_ID` and `SIGNING_KEY_VERSION` are not validated during configuration loading.
-- The AWS KMS region is fixed to `sa-east-1`.
+- Migrations are explicit SQL files and are not automatically applied by the Lambda.
+- Real AWS KMS and PostgreSQL integration tests are not present because managed test resources are not available yet.
+- The advisory lock protects the database transaction, while infrastructure remains responsible for preventing overlapping Lambda invocations and unnecessary pre-transaction KMS work.
 - Structured logs, metrics, tracing, and operational alerts are not implemented.
 - Decryption and signing consumers are outside this repository.
-- Deployment infrastructure and scheduled invocation are outside this repository.
 
 ---
 
@@ -596,17 +645,16 @@ When extending the service:
 - [x] Encrypt private keys with AES-256-GCM.
 - [x] Implement transactional lifecycle rotation.
 - [x] Add AWS Lambda bootstrap and PostgreSQL persistence.
-- [ ] Define and version PostgreSQL migrations.
-- [ ] Add unit tests for generators, mappers, services, and use cases.
-- [ ] Add KMS and PostgreSQL integration tests.
-- [ ] Add AES-GCM encryption/decryption round-trip tests.
-- [ ] Enforce lifecycle invariants at the database level.
-- [ ] Serialize concurrent rotation attempts.
-- [ ] Validate every required environment variable at startup.
-- [ ] Make AWS region an explicit configuration value.
-- [ ] Add structured logging, metrics, tracing, and alerts.
-- [ ] Implement CI validation and release automation.
-- [ ] Define deployment infrastructure and scheduled invocation.
+- [x] Define and version the initial PostgreSQL migration.
+- [x] Add unit tests for generators, mappers, services, and use cases.
+- [x] Add AES-GCM encryption/decryption round-trip tests.
+- [x] Enforce lifecycle invariants with check constraints and partial indexes.
+- [x] Serialize database rotation attempts with an advisory transaction lock.
+- [x] Validate every required environment variable at startup.
+- [x] Make AWS region an explicit configuration value.
+- [x] Implement CI validation without release automation.
+- [ ] Define structured logging, metrics, tracing, and alerts incrementally.
+- [ ] Add real AWS KMS and PostgreSQL integration tests when managed test resources exist.
 
 ---
 
